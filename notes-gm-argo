@@ -1,0 +1,209 @@
+### Preparations
+
+#brew install argocd
+#https://github.com/solo-io/workshops/tree/master/gloo-mesh-all
+
+3 x Kubernetes clusters: Minikube, Kubernetes v1.21, Metallb, CRI containerd, CNI calico, Node cpu 6 & mem 12GB
+Gloo Mesh v1.2.13
+ArgoCD v2.3.3
+Istio v1.11
+BookInfo demo application
+
+### Start Demo
+
+ArgoCD UI:
+open https://192.168.64.41
+BookInfo UI:
+open "http://${ENDPOINT_HTTP_GW_CLUSTER1}/productpage"
+
+##Add ArgoCD APPs in UI
+
+##Enable Zero Trust
+#No TLS
+kubectl --context ${CLUSTER1} exec -t deploy/reviews-v1 -c istio-proxy \
+-- openssl s_client -showcerts -connect ratings:9080
+
+#Enable Istio TLS
+vi policies/cluster1/kustomization.yaml
+vi policies/cluster2/kustomization.yaml
+git add --all && git commit -m "update $(date)" && git push origin main
+#Sync argocd & check TLS again
+kubectl --context ${CLUSTER1} exec -t deploy/reviews-v1 -c istio-proxy \
+-- openssl s_client -showcerts -connect ratings:9080
+
+
+
+#Enable shared root Trust
+vi policies/mgmt/kustomization.yaml
+git add --all && git commit -m "update $(date)" && git push origin main
+#Sync & Check new ca cert
+kubectl --context ${CLUSTER1} get secret -n istio-system cacerts -o yaml
+kubectl --context ${CLUSTER2} get secret -n istio-system cacerts -o yaml
+
+echo "" |base64 -d >root1.pem
+openssl x509 -in root1.pem -serial -subject -issuer -startdate -enddate -noout
+kubectl --context ${CLUSTER1} exec -t deploy/reviews-v1 -c istio-proxy \
+-- openssl s_client -showcerts -connect ratings:9080
+openssl x509 -in app1-sa.pem -noout -text | grep -C1 -i "URI:spiffe:"
+openssl x509 -in app1-sa.pem -serial -subject -issuer -startdate -enddate -noout
+
+#But the application is still accessible?
+#globalAccessPolicy: ENABLED
+vi policies/mgmt/VirtualMesh.yaml
+git add --all && git commit -m "update $(date)" && git push origin main
+#RBAC: access denied
+
+vi policies/mgmt/kustomization.yaml
+git add --all && git commit -m "update $(date)" && git push origin main
+#Sync & Refresh
+vi policies/mgmt/kustomization.yaml
+git add --all && git commit -m "update $(date)" && git push origin main
+#Sync & Refresh
+
+##Traffic Policies
+#Shift 75% traffic
+vi policies/mgmt/kustomization.yaml
+git add --all && git commit -m "update $(date)" && git push origin main
+#Sync & Refresh
+vi policies/mgmt/AccessPolicy-reviews-ratings.yaml
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+RESET:
+cd ~/repos/gitops
+rm -rf gm-argo && mkdir gm-argo && cp -r gm-argo-base/* gm-argo/
+cd gm-argo
+echo "# gm-argo" > README.md
+git init
+git add --all
+git commit -m "first commit"
+git branch -M main
+git remote add origin https://github.com/Boes-man/gm-argo.git
+git push -u origin main
+
+cd ~/repos/minikube
+bash gm-workshop/bootstrap-minikube.sh
+cd ~/repos/gitops/gm-argo
+bash ~/repos/gmesh/install-helm_v1.x.sh
+bash install-argocd.sh
+k apply -f ../gm-argo-base/update-gm-rbac.yaml
+bash ~/repos/istio/bootstrap-istio-op.sh
+bash ~/repos/istio/bookinfo/install-workshop-1.11.sh
+
+export ENDPOINT_HTTP_GW_CLUSTER1=$(kubectl --context ${CLUSTER1} -n istio-system get svc istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].*}'):80
+export ENDPOINT_HTTPS_GW_CLUSTER1=$(kubectl --context ${CLUSTER1} -n istio-system get svc istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].*}'):443
+export HOST_GW_CLUSTER1=$(echo ${ENDPOINT_HTTP_GW_CLUSTER1} | cut -d: -f1)
+
+
+
+
+apiVersion: rbac.enterprise.mesh.gloo.solo.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    meta.helm.sh/release-name: gloo-mesh-enterprise
+    meta.helm.sh/release-namespace: gloo-mesh
+  creationTimestamp: "2022-04-07T23:47:14Z"
+  generation: 4
+  labels:
+    app: gloo-mesh
+    app.kubernetes.io/managed-by: Helm
+  name: admin-role-binding
+  namespace: gloo-mesh
+  resourceVersion: "5814"
+  uid: 580a9144-cb31-4b0d-b04b-ee45f52d9fcd
+spec:
+  roleRef:
+    name: admin-role
+    namespace: gloo-mesh
+  subjects:
+  - kind: User
+    name: system:serviceaccount:argocd:argocd-application-controller
+  - kind: Group
+    name: system:masters
+
+
+
+
+
+
+
+
+
+
+
+
+kubectl create namespace argocd --context mgmt
+kubectl apply -n argocd --context mgmt -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl rollout status deploy/argocd-server -n argocd --context mgmt
+kubectl rollout status deploy/argocd-applicationset-controller -n argocd --context mgmt
+kubectl patch svc argocd-server -n argocd --context mgmt -p '{"spec": {"type": "LoadBalancer"}}'
+kubectl --context mgmt -n argocd patch secret argocd-secret \
+  -p '{"stringData": {
+    "admin.password": "$2a$10$79yaoOg9dL5MO8pn8hGqtO4xQDejSEVNWAGQR268JHLdrCw6UCYmy",
+    "admin.passwordMtime": "'$(date +%FT%T%Z)'"
+  }}'
+
+argocd login 192.168.64.40 --insecure --username admin --password solo.io
+argocd cluster add cluster1 -y
+argocd cluster add cluster2 -y
+# kubectl create namespace argocd --context cluster1
+# kubectl apply -n argocd --context cluster1 -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# kubectl create namespace argocd --context cluster2
+# kubectl apply -n argocd --context cluster2 -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# #kubectl --context cluster1 -n argocd apply -f ../solo/gitops-library/argocd/base/argocd-2.3.0.yaml
+# kubectl rollout status deploy/argocd-server -n argocd --context cluster2
+# kubectl rollout status deploy/argocd-applicationset-controller -n argocd --context cluster2
+# kubectl patch svc argocd-server -n argocd --context mgmt -p '{"spec": {"type": "LoadBalancer"}}'
+# kubectl patch svc argocd-server -n argocd --context cluster1 -p '{"spec": {"type": "LoadBalancer"}}'
+# kubectl patch svc argocd-server -n argocd --context cluster2 -p '{"spec": {"type": "LoadBalancer"}}'
+
+#set ui password
+# bcrypt(password)=$2a$10$79yaoOg9dL5MO8pn8hGqtO4xQDejSEVNWAGQR268JHLdrCw6UCYmy
+# password: solo.io
+# kubectl --context mgmt -n argocd patch secret argocd-secret \
+#   -p '{"stringData": {
+#     "admin.password": "$2a$10$79yaoOg9dL5MO8pn8hGqtO4xQDejSEVNWAGQR268JHLdrCw6UCYmy",
+#     "admin.passwordMtime": "'$(date +%FT%T%Z)'"
+#   }}'
+#   kubectl --context cluster1 -n argocd patch secret argocd-secret \
+#   -p '{"stringData": {
+#     "admin.password": "$2a$10$79yaoOg9dL5MO8pn8hGqtO4xQDejSEVNWAGQR268JHLdrCw6UCYmy",
+#     "admin.passwordMtime": "'$(date +%FT%T%Z)'"
+#   }}'
+#   kubectl --context cluster2 -n argocd patch secret argocd-secret \
+#   -p '{"stringData": {
+#     "admin.password": "$2a$10$79yaoOg9dL5MO8pn8hGqtO4xQDejSEVNWAGQR268JHLdrCw6UCYmy",
+#     "admin.passwordMtime": "'$(date +%FT%T%Z)'"
+#   }}'
+
+open https://192.168.64.40
+# open https://192.168.64.60
+# open https://192.168.64.80
+
+bash ../../gmesh/install-helm_v1.x.sh
+
+#add repo
+argocd app create management --repo https://github.com/Boes-man/flux-gm.git --path policies/mgmt --dest-name mgmt --auth-token $GITHUB_TOKEN
+
+
